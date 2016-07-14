@@ -35,8 +35,11 @@ const keys = {
     40: 1,
     13: 1 // enter
 };
+
 // ie6使用其他的会有一段空白出现
 let fillChar = ie && browser.version === '6' ? '\ufeff' : '\u200B';
+let fillCharReg = new RegExp(fillChar, 'g');
+
 let attrFix = {
     tabindex: 'tabIndex',
     readonly: 'readOnly'
@@ -48,62 +51,71 @@ let styleBlock = utils.listToMap([
     'table-row', 'table-column-group', 'table-column',
     'table-cell', 'table-caption'
 ]);
-let fillCharReg = new RegExp(fillChar, 'g');
 
 /**
  * 设置节点node及其子节点不会被选中
  * @name unSelectable
  * @grammar UM.dom.domUtils.unSelectable(node)
  */
-let unSelectable = ie && browser.ie9below || browser.opera ? function (node) {
-    // for ie9
-    node.onselectstart = function () {
-        return false;
-    };
-    node.onclick = node.onkeyup = node.onkeydown = function () {
-        return false;
-    };
-    node.unselectable = 'on';
-    node.setAttribute('unselectable', 'on');
-    for (let i = 0, ci; ci = node.all[i++];) {
-        switch (ci.tagName.toLowerCase()) {
-            case 'iframe' :
-            case 'textarea' :
-            case 'input' :
-            case 'select' :
-                break;
-            default :
-                ci.unselectable = 'on';
-                node.setAttribute('unselectable', 'on');
-        }
+let unSelectable = ie && browser.ie9below || browser.opera
+    ? function (node) {
+        // for ie9
+        node.onselectstart = () => false;
+        node.onclick = node.onkeyup = node.onkeydown = () => false;
+
+        let ignoredTagNames = utils.listToMap(['iframe', 'textarea', 'input', 'select']);
+        let setUnselectable = node => {
+            node.unselectable = 'on';
+            node.setAttribute('unselectable', 'on');
+        };
+        [].slice.call(node.all)
+            .filter(({tagName}) => !ignoredTagNames.hasOwnProperty(tagName))
+            .concat(node)
+            .forEach(setUnselectable);
     }
-} : function (node) {
-    node.style.MozUserSelect = node.style.webkitUserSelect
-        = node.style.msUserSelect = node.style.KhtmlUserSelect = 'none';
-};
+    : function (node) {
+        node.style.MozUserSelect = node.style.webkitUserSelect
+            = node.style.msUserSelect = node.style.KhtmlUserSelect = 'none';
+    };
 
 export default class DOMUtil {
     static getDomNode(node, start, ltr, startFromChild, fn, guard) {
         let tmpNode = startFromChild && node[start];
-        let parent;
+        let parent = node.parentNode;
         !tmpNode && (tmpNode = node[ltr]);
-        while (!tmpNode && (parent = (parent || node).parentNode)) {
-            if (parent.tagName === 'BODY' || guard && !guard(parent)) {
+
+        let isEndpoint = node => {
+            if (node.tagName === 'BODY') {
+                return true;
+            }
+            if (guard) {
+                return !guard(node);
+            }
+            return false;
+        }
+
+        while (!tmpNode) {
+            if (isEndpoint(parent)) {
                 return null;
             }
+
             tmpNode = parent[ltr];
+            parent = parent.parentNode;
         }
+
         if (tmpNode && fn && !fn(tmpNode)) {
-            return  DOMUtil.getDomNode(tmpNode, start, ltr, false, fn);
+            return DOMUtil.getDomNode(tmpNode, start, ltr, false, fn);
         }
         return tmpNode;
     }
+
     static breakParent(node, parent) {
         let tmpNode;
         let parentClone = node;
         let clone = node;
         let leftNodes;
         let rightNodes;
+
         do {
             parentClone = parentClone.parentNode;
             if (leftNodes) {
@@ -126,6 +138,7 @@ export default class DOMUtil {
             }
             clone = parentClone;
         } while (parent !== parentClone);
+
         tmpNode = parent.parentNode;
         tmpNode.insertBefore(leftNodes, parent);
         tmpNode.insertBefore(rightNodes, parent);
@@ -133,11 +146,13 @@ export default class DOMUtil {
         DOMUtil.remove(parent);
         return node;
     }
+
     static trimWhiteTextNode(node) {
         function remove(dir) {
-            let child;
-            while ((child = node[dir]) && child.nodeType === 3 && DOMUtil.isWhitespace(child)) {
+            let child = node[dir];
+            while (child && child.nodeType === 3 && DOMUtil.isWhitespace(child)) {
                 node.removeChild(child);
+                child = node[dir];
             }
         }
         remove('firstChild');
@@ -149,30 +164,37 @@ export default class DOMUtil {
         if (nodeA === nodeB) {
             return 0;
         }
-        let node;
-        let parentsA = [nodeA];
-        let parentsB = [nodeB];
-        node = nodeA;
-        while (node = node.parentNode) {
-            // 如果nodeB是nodeA的祖先节点
-            if (node === nodeB) {
-                return 10;
+
+        let collectParents = (startNode, comparePoint) => {
+            let node = startNode.parentNode;
+            let parents = [];
+            while (node) {
+                // 如果nodeB是nodeA的祖先节点
+                if (node === comparePoint) {
+                    return [true, null];
+                }
+                parents.push(node);
             }
-            parentsA.push(node);
+
+            return [false, parents];
         }
-        node = nodeB;
-        while (node = node.parentNode) {
-            // 如果nodeA是nodeB的祖先节点
-            if (node === nodeA) {
-                return 20;
-            }
-            parentsB.push(node);
+
+        let [isBContainsA, parentsA] = collectParents(nodeA, nodeB);
+        if (isBContainsA) {
+            return 10;
         }
+        let [isAContainsB, parentsB] = collectParents(nodeB, nodeA);
+        if (isAContainsB) {
+            return 20;
+        }
+
         parentsA.reverse();
         parentsB.reverse();
+
         if (parentsA[0] !== parentsB[0]) {
             return 1;
         }
+
         let i = -1;
         while (i++, parentsA[i] === parentsB[i]) {
         }
@@ -220,10 +242,12 @@ export default class DOMUtil {
     }
 
     static findParentByTagName(node, tagNames, includeSelf, excludeFn) {
-        tagNames = utils.listToMap(utils.isArray(tagNames) ? tagNames : [tagNames]);
-        return this.findParent(node, function (node) {
-            return tagNames[node.tagName] && !(excludeFn && excludeFn(node));
-        }, includeSelf);
+        tagNames = utils.listToMap([].concat(tagNames));
+        return this.findParent(
+            node,
+            node => tagNames[node.tagName] && !(excludeFn && excludeFn(node))),
+            includeSelf
+        );
     }
 
     static findParents(node, includeSelf, filterFn, closerFirst) {
@@ -255,10 +279,10 @@ export default class DOMUtil {
     static getNextDomNode(node, startFromChild, filterFn, guard) {
         return DOMUtil.getDomNode(node, 'firstChild', 'nextSibling', startFromChild, filterFn, guard);
     }
+
     static getPreDomNode(node, startFromChild, filterFn, guard) {
         return DOMUtil.getDomNode(node, 'lastChild', 'previousSibling', startFromChild, filterFn, guard);
     }
-
 
     static isBookmarkNode(node) {
         return node.nodeType === 1 && node.id && /^_baidu_bookmark_/i.test(node.id);
@@ -269,11 +293,16 @@ export default class DOMUtil {
         return doc.defaultView || doc.parentWindow;
     }
 
-
     static getCommonAncestor(nodeA, nodeB) {
-        if (nodeA === nodeB)
+        if (nodeA === nodeB) {
             return nodeA;
-        let parentsA = [nodeA] , parentsB = [nodeB], parent = nodeA, i = -1;
+        }
+
+        let parentsA = [nodeA];
+        let parentsB = [nodeB];
+        let parent = nodeA;
+        let i = -1;
+
         while (parent = parent.parentNode) {
             if (parent === nodeB) {
                 return parent;
@@ -292,15 +321,15 @@ export default class DOMUtil {
         while (i++, parentsA[i] === parentsB[i]) {
         }
         return i === 0 ? null : parentsA[i - 1];
-
     }
 
     static clearEmptySibling(node, ignoreNext, ignorePre) {
         function clear(next, dir) {
             let tmpNode;
             while (next && !DOMUtil.isBookmarkNode(next) && (DOMUtil.isEmptyInlineElement(next)
-            // 这里不能把空格算进来会吧空格干掉，出现文字间的空格丢掉了
-            || !new RegExp('[^\t\n\r' + fillChar + ']').test(next.nodeValue))) {
+                // 这里不能把空格算进来会吧空格干掉，出现文字间的空格丢掉了
+                || !new RegExp('[^\t\n\r' + fillChar + ']').test(next.nodeValue))
+            ) {
                 tmpNode = next[dir];
                 DOMUtil.remove(next);
                 next = tmpNode;
@@ -319,7 +348,6 @@ export default class DOMUtil {
         }
         return node.splitText(offset);
     }
-
 
     static isWhitespace(node) {
         return !new RegExp('[^ \t\n\r' + fillChar + ']').test(node.nodeValue);
@@ -356,12 +384,10 @@ export default class DOMUtil {
         return 1;
     }
 
-
     static isBlockElm(node) {
         return node.nodeType === 1 && (dtd.$block[node.tagName]
             || styleBlock[DOMUtil.getComputedStyle(node, 'display')]) && !dtd.$nonChild[node.tagName];
     }
-
 
     static getElementsByTagName(node, name, filter) {
         if (filter && utils.isString(filter)) {
@@ -502,17 +528,15 @@ export default class DOMUtil {
         return count;
     }
 
-
     static isEmptyNode(node) {
-        return !node.firstChild || DOMUtil.getChildCount(node, function (node) {
-                return  !DOMUtil.isBr(node) && !DOMUtil.isBookmarkNode(node) && !DOMUtil.isWhitespace(node);
-            }) === 0;
+        let isEmpty = node => !DOMUtil.isBr(node) && !DOMUtil.isBookmarkNode(node) && !DOMUtil.isWhitespace(node);
+        return [].slice.call(node.childNodes).every(isEmpty);
     }
-
 
     static isBr(node) {
         return node.nodeType === 1 && node.tagName === 'BR';
     }
+
     static isFillChar(node, isInStart) {
         return node.nodeType === 3 && !node.nodeValue.replace(new RegExp((isInStart ? '^' : '')
                 + fillChar), '').length;
@@ -538,11 +562,13 @@ export default class DOMUtil {
     static isCustomeNode(node) {
         return node.nodeType === 1 && node.getAttribute('_ue_custom_node_');
     }
+
     static fillNode(doc, node) {
         let tmpNode = browser.ie ? doc.createTextNode(fillChar) : doc.createElement('br');
         node.innerHTML = '';
         node.appendChild(tmpNode);
     }
+
     static isBoundaryNode(node, dir) {
         let tmp;
         while (!DOMUtil.isBody(node)) {
